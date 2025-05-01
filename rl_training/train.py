@@ -23,23 +23,23 @@ import logging
 import math
 import os
 import random
-from pathlib import Path
 from copy import deepcopy
+from pathlib import Path
 
 import datasets
 import nltk
 import numpy as np
 import torch
 import torch.nn.functional as F
-from datasets import load_dataset, load_metric
-from torch.utils.data import DataLoader
-from torch.nn import CrossEntropyLoss
-from tqdm.auto import tqdm
-
 import transformers
 from accelerate import Accelerator, DeepSpeedPlugin
+from datasets import load_dataset, load_metric
 from filelock import FileLock
 from huggingface_hub import Repository
+from rl_utils import DataCollatorForSeq2Seq, discounted_future_sum, polyak_update
+from torch.nn import CrossEntropyLoss
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 from transformers import (
     CONFIG_MAPPING,
     MODEL_MAPPING,
@@ -54,10 +54,11 @@ from transformers import (
 from transformers.file_utils import is_offline_mode
 from transformers.utils.versions import require_version
 
-from rl_utils import DataCollatorForSeq2Seq, discounted_future_sum, polyak_update
-
 logger = logging.getLogger(__name__)
-require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/summarization/requirements.txt")
+require_version(
+    "datasets>=1.8.0",
+    "To fix: pip install -r examples/pytorch/summarization/requirements.txt",
+)
 
 # You should update this to your particular problem to have better documentation of `model_type`
 MODEL_CONFIG_CLASSES = list(MODEL_MAPPING.keys())
@@ -89,7 +90,9 @@ summarization_name_mapping = {
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Finetune a transformers model on a summarization task")
+    parser = argparse.ArgumentParser(
+        description="Finetune a transformers model on a summarization task"
+    )
     parser.add_argument(
         "--dataset_name",
         type=str,
@@ -103,16 +106,23 @@ def parse_args():
         help="The configuration name of the dataset to use (via the datasets library).",
     )
     parser.add_argument(
-        "--train_file", type=str, default=None, help="A csv or a json file containing the training data."
+        "--train_file",
+        type=str,
+        default=None,
+        help="A csv or a json file containing the training data.",
     )
     parser.add_argument(
-        "--validation_file", type=str, default=None, help="A csv or a json file containing the validation data."
+        "--validation_file",
+        type=str,
+        default=None,
+        help="A csv or a json file containing the validation data.",
     )
     parser.add_argument(
         "--ignore_pad_token_for_loss",
         type=bool,
         default=True,
-        help="Whether to ignore the tokens corresponding to " "padded labels in the loss computation or not.",
+        help="Whether to ignore the tokens corresponding to "
+        "padded labels in the loss computation or not.",
     )
     parser.add_argument(
         "--max_source_length",
@@ -125,7 +135,7 @@ def parse_args():
         "--source_prefix",
         type=str,
         default=None,
-        help="A prefix to add before every source text " "(useful for T5 models).",
+        help="A prefix to add before every source text (useful for T5 models).",
     )
     parser.add_argument(
         "--target_prefix",
@@ -140,7 +150,10 @@ def parse_args():
         help="The number of processes to use for the preprocessing.",
     )
     parser.add_argument(
-        "--overwrite_cache", type=bool, default=False, help="Overwrite the cached training and evaluation sets"
+        "--overwrite_cache",
+        type=bool,
+        default=False,
+        help="Overwrite the cached training and evaluation sets",
     )
     parser.add_argument(
         "--max_target_length",
@@ -233,8 +246,15 @@ def parse_args():
         default=5e-5,
         help="Initial learning rate (after the potential warmup period) to use.",
     )
-    parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
-    parser.add_argument("--num_train_epochs", type=int, default=3, help="Total number of training epochs to perform.")
+    parser.add_argument(
+        "--weight_decay", type=float, default=0.0, help="Weight decay to use."
+    )
+    parser.add_argument(
+        "--num_train_epochs",
+        type=int,
+        default=3,
+        help="Total number of training epochs to perform.",
+    )
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -252,13 +272,27 @@ def parse_args():
         type=SchedulerType,
         default="linear",
         help="The scheduler type to use.",
-        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
+        choices=[
+            "linear",
+            "cosine",
+            "cosine_with_restarts",
+            "polynomial",
+            "constant",
+            "constant_with_warmup",
+        ],
     )
     parser.add_argument(
-        "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
+        "--num_warmup_steps",
+        type=int,
+        default=0,
+        help="Number of steps for the warmup in the lr scheduler.",
     )
-    parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
-    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument(
+        "--output_dir", type=str, default=None, help="Where to store the final model."
+    )
+    parser.add_argument(
+        "--seed", type=int, default=None, help="A seed for reproducible training."
+    )
     parser.add_argument(
         "--model_type",
         type=str,
@@ -270,18 +304,14 @@ def parse_args():
         "--cache_dir",
         type=str,
         default="~/.cache/huggingface/datasets",
-        help="Cache directory for datasets."
+        help="Cache directory for datasets.",
     )
-    parser.add_argument(
-        "--eval",
-        action="store_true",
-        help="Only run evaluation."
-    )
+    parser.add_argument("--eval", action="store_true", help="Only run evaluation.")
     parser.add_argument(
         "--num_steps",
         type=int,
         default=5,
-        help="Number of steps for estimating Q function."
+        help="Number of steps for estimating Q function.",
     )
     parser.add_argument(
         "--gamma",
@@ -298,15 +328,23 @@ def parse_args():
     args = parser.parse_args()
 
     # Sanity checks
-    if args.dataset_name is None and args.train_file is None and args.validation_file is None:
+    if (
+        args.dataset_name is None
+        and args.train_file is None
+        and args.validation_file is None
+    ):
         raise ValueError("Need either a dataset name or a training/validation file.")
     else:
         if args.train_file is not None:
             extension = args.train_file.split(".")[-1]
-            assert extension in ["csv", "json"], "`train_file` should be a csv or a json file."
+            assert extension in ["csv", "json"], (
+                "`train_file` should be a csv or a json file."
+            )
         if args.validation_file is not None:
             extension = args.validation_file.split(".")[-1]
-            assert extension in ["csv", "json"], "`validation_file` should be a csv or a json file."
+            assert extension in ["csv", "json"], (
+                "`validation_file` should be a csv or a json file."
+            )
 
     return args
 
@@ -316,10 +354,10 @@ def get_raw_dataset(args):
     Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
     or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
     (the dataset will be downloaded automatically from the datasets Hub).
-    
+
     For CSV/JSON files, this script will use the column called 'text' or the first column if no column called
     'text' is found. You can easily tweak this behavior (see below).
-    
+
     In distributed training, the load_dataset function guarantee that only one local process can concurrently
     download the dataset.
 
@@ -329,9 +367,7 @@ def get_raw_dataset(args):
     if args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
         raw_datasets = load_dataset(
-            args.dataset_name,
-            args.dataset_config_name,
-            cache_dir=args.cache_dir
+            args.dataset_name, args.dataset_config_name, cache_dir=args.cache_dir
         )
     else:
         data_files = {}
@@ -350,7 +386,7 @@ def load_pretrained_model_and_tokenizer(
     config_name,
     tokenizer_name,
     model_type=None,
-    use_slow_tokenizer=False
+    use_slow_tokenizer=False,
 ):
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
@@ -363,9 +399,13 @@ def load_pretrained_model_and_tokenizer(
         logger.warning("You are instantiating a new config instance from scratch.")
 
     if tokenizer_name:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=not use_slow_tokenizer)
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_name, use_fast=not use_slow_tokenizer
+        )
     elif model_name_or_path:
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_fast=not use_slow_tokenizer)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name_or_path, use_fast=not use_slow_tokenizer
+        )
     else:
         raise ValueError(
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
@@ -389,7 +429,9 @@ def get_column_names(args, column_names):
     """Get the column names for input/target."""
     dataset_columns = summarization_name_mapping.get(args.dataset_name, None)
     if args.text_column is None:
-        text_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
+        text_column = (
+            dataset_columns[0] if dataset_columns is not None else column_names[0]
+        )
     else:
         text_column = args.text_column
         if text_column not in column_names:
@@ -397,7 +439,9 @@ def get_column_names(args, column_names):
                 f"--text_column' value '{args.text_column}' needs to be one of: {', '.join(column_names)}"
             )
     if args.summary_column is None:
-        summary_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
+        summary_column = (
+            dataset_columns[1] if dataset_columns is not None else column_names[1]
+        )
     else:
         summary_column = args.summary_column
         if summary_column not in column_names:
@@ -409,14 +453,16 @@ def get_column_names(args, column_names):
 
 def process_raw_dataset(args, accelerator, raw_datasets, tokenizer):
     # First we tokenize all the texts.
-    column_names = raw_datasets["train"].column_names  # xsum: ['document', 'summary', 'reward']
+    column_names = raw_datasets[
+        "train"
+    ].column_names  # xsum: ['document', 'summary', 'reward']
     text_column, summary_column = get_column_names(args, column_names)
-    reward_column = 'reward'
+    reward_column = "reward"
 
     # Temporarily set max_target_length for training.
     max_target_length = args.max_target_length
     padding = "max_length" if args.pad_to_max_length else False
-    
+
     prefix = args.source_prefix if args.source_prefix is not None else ""
     target_prefix = args.target_prefix if args.target_prefix is not None else ""
 
@@ -426,18 +472,23 @@ def process_raw_dataset(args, accelerator, raw_datasets, tokenizer):
         rewards = examples[reward_column] if reward_column in examples.keys() else None
 
         inputs = [prefix + inp for inp in inputs]
-        model_inputs = tokenizer(inputs, max_length=args.max_source_length, padding=padding, truncation=True)
-        
+        model_inputs = tokenizer(
+            inputs, max_length=args.max_source_length, padding=padding, truncation=True
+        )
+
         # Setup the tokenizer for targets
         targets = [target_prefix + inp for inp in targets]
         with tokenizer.as_target_tokenizer():
-            labels = tokenizer(targets, max_length=max_target_length, padding=padding, truncation=True)
+            labels = tokenizer(
+                targets, max_length=max_target_length, padding=padding, truncation=True
+            )
 
         # If we are padding here, replace all tokenizer.pad_token_id in the labels by -100 when we want to ignore
         # padding in the loss.
         if padding == "max_length" and args.ignore_pad_token_for_loss:
             labels["input_ids"] = [
-                [(l if l != tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
+                [(l if l != tokenizer.pad_token_id else -100) for l in label]
+                for label in labels["input_ids"]
             ]
 
         model_inputs["labels"] = labels["input_ids"]
@@ -463,11 +514,19 @@ def setup_optimizer(args, model):
     no_decay = ["bias", "LayerNorm.weight"]
     optimizer_grouped_parameters = [
         {
-            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+            "params": [
+                p
+                for n, p in model.named_parameters()
+                if not any(nd in n for nd in no_decay)
+            ],
             "weight_decay": args.weight_decay,
         },
         {
-            "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+            "params": [
+                p
+                for n, p in model.named_parameters()
+                if any(nd in n for nd in no_decay)
+            ],
             "weight_decay": 0.0,
         },
     ]
@@ -492,7 +551,9 @@ def eval(args, accelerator, model, tokenizer, eval_dataloader, metric):
         args.val_max_target_length = args.max_target_length
 
     gen_kwargs = {
-        "max_length": args.val_max_target_length if args is not None else config.max_length,
+        "max_length": args.val_max_target_length
+        if args is not None
+        else config.max_length,
         "num_beams": args.num_beams,
     }
     for step, batch in enumerate(eval_dataloader):
@@ -522,10 +583,14 @@ def eval(args, accelerator, model, tokenizer, eval_dataloader, metric):
             if isinstance(generated_tokens, tuple):
                 generated_tokens = generated_tokens[0]
 
-            decoded_preds = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+            decoded_preds = tokenizer.batch_decode(
+                generated_tokens, skip_special_tokens=True
+            )
             decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
-            decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
+            decoded_preds, decoded_labels = postprocess_text(
+                decoded_preds, decoded_labels
+            )
 
             metric.add_batch(predictions=decoded_preds, references=decoded_labels)
 
@@ -559,7 +624,9 @@ def main():
 
     # Setup logging, we only want one process per machine to log things on the screen.
     # accelerator.is_local_main_process is only True for one process per machine.
-    logger.setLevel(logging.INFO if accelerator.is_local_main_process else logging.ERROR)
+    logger.setLevel(
+        logging.INFO if accelerator.is_local_main_process else logging.ERROR
+    )
     if accelerator.is_local_main_process:
         datasets.utils.logging.set_verbosity_warning()
         transformers.utils.logging.set_verbosity_info()
@@ -583,12 +650,14 @@ def main():
         args.config_name,
         args.tokenizer_name,
         model_type=args.model_type,
-        use_slow_tokenizer=args.use_slow_tokenizer
+        use_slow_tokenizer=args.use_slow_tokenizer,
     )
 
     model.resize_token_embeddings(len(tokenizer))
     if model.config.decoder_start_token_id is None:
-        raise ValueError("Make sure that `config.decoder_start_token_id` is correctly defined")
+        raise ValueError(
+            "Make sure that `config.decoder_start_token_id` is correctly defined"
+        )
 
     tgt_model = deepcopy(model)
 
@@ -604,7 +673,9 @@ def main():
     for index in random.sample(range(len(train_dataset)), 1):
         logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
 
-    label_pad_token_id = -100 if args.ignore_pad_token_for_loss else tokenizer.pad_token_id
+    label_pad_token_id = (
+        -100 if args.ignore_pad_token_for_loss else tokenizer.pad_token_id
+    )
     data_collator = DataCollatorForSeq2Seq(
         tokenizer,
         model=model,
@@ -613,29 +684,40 @@ def main():
     )
 
     train_dataloader = DataLoader(
-        train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
+        train_dataset,
+        shuffle=True,
+        collate_fn=data_collator,
+        batch_size=args.per_device_train_batch_size,
     )
     eval_dataloader = DataLoader(
-        eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
+        eval_dataset,
+        collate_fn=data_collator,
+        batch_size=args.per_device_eval_batch_size,
     )
 
     # Prepare optimizer
     optimizer = setup_optimizer(args, model)
 
     # Prepare everything with our `accelerator`.
-    model, tgt_model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
-        model, tgt_model, optimizer, train_dataloader, eval_dataloader
+    model, tgt_model, optimizer, train_dataloader, eval_dataloader = (
+        accelerator.prepare(
+            model, tgt_model, optimizer, train_dataloader, eval_dataloader
+        )
     )
 
     # Note -> the training dataloader needs to be prepared before we grab his length below (cause its length will be
     # shorter in multiprocess)
 
     # Scheduler and math around the number of training steps.
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(
+        len(train_dataloader) / args.gradient_accumulation_steps
+    )
     if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     else:
-        args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+        args.num_train_epochs = math.ceil(
+            args.max_train_steps / num_update_steps_per_epoch
+        )
 
     lr_scheduler = get_scheduler(
         name=args.lr_scheduler_type,
@@ -660,17 +742,29 @@ def main():
         logger.info(result)
     else:
         # Train!
-        total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+        total_batch_size = (
+            args.per_device_train_batch_size
+            * accelerator.num_processes
+            * args.gradient_accumulation_steps
+        )
 
         logger.info("***** Running training *****")
         logger.info(f"  Num examples = {len(train_dataset)}")
         logger.info(f"  Num Epochs = {args.num_train_epochs}")
-        logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
-        logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-        logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+        logger.info(
+            f"  Instantaneous batch size per device = {args.per_device_train_batch_size}"
+        )
+        logger.info(
+            f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}"
+        )
+        logger.info(
+            f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}"
+        )
         logger.info(f"  Total optimization steps = {args.max_train_steps}")
         # Only show the progress bar once on each machine.
-        progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
+        progress_bar = tqdm(
+            range(args.max_train_steps), disable=not accelerator.is_local_main_process
+        )
         completed_steps = 0
 
         for epoch in range(args.num_train_epochs):
@@ -678,32 +772,47 @@ def main():
             tgt_model.eval()
             for step, batch in enumerate(train_dataloader):
                 # batch: ['input_ids', 'attention_mask', 'labels', 'rewards', 'decoder_input_ids']
-                batch_size, tgt_len = batch['labels'].shape
-                outputs = model(**{
-                    'input_ids': batch['input_ids'],
-                    'attention_mask': batch['attention_mask'],
-                    'decoder_input_ids': batch['decoder_input_ids']
-                })
+                batch_size, tgt_len = batch["labels"].shape
+                outputs = model(
+                    **{
+                        "input_ids": batch["input_ids"],
+                        "attention_mask": batch["attention_mask"],
+                        "decoder_input_ids": batch["decoder_input_ids"],
+                    }
+                )
 
-                loss_fct = CrossEntropyLoss(reduction='none')
-                loss = loss_fct(outputs.logits.view(-1, config.vocab_size), batch['labels'].view(-1))
+                loss_fct = CrossEntropyLoss(reduction="none")
+                loss = loss_fct(
+                    outputs.logits.view(-1, config.vocab_size), batch["labels"].view(-1)
+                )
                 loss = loss.view(batch_size, tgt_len)
 
                 # calculate estimated Q value
-                seq_lens = torch.sum(batch['labels'] != -100, dim=-1)                
-                Q = discounted_future_sum(batch['rewards'], seq_lens, num_steps=args.num_steps, gamma=args.gamma).detach()
-                
+                seq_lens = torch.sum(batch["labels"] != -100, dim=-1)
+                Q = discounted_future_sum(
+                    batch["rewards"],
+                    seq_lens,
+                    num_steps=args.num_steps,
+                    gamma=args.gamma,
+                ).detach()
+
                 # calculate importance sampling ratio
                 with torch.no_grad():
-                    tgt_outputs = tgt_model(**{
-                        'input_ids': batch['input_ids'],
-                        'attention_mask': batch['attention_mask'],
-                        'decoder_input_ids': batch['decoder_input_ids']
-                    })
-                    tgt_logits = tgt_outputs.logits.view(-1, config.vocab_size)  # [batch * tgt_len, vocab_size]
+                    tgt_outputs = tgt_model(
+                        **{
+                            "input_ids": batch["input_ids"],
+                            "attention_mask": batch["attention_mask"],
+                            "decoder_input_ids": batch["decoder_input_ids"],
+                        }
+                    )
+                    tgt_logits = tgt_outputs.logits.view(
+                        -1, config.vocab_size
+                    )  # [batch * tgt_len, vocab_size]
 
-                    tgt_nll = loss_fct(tgt_logits, batch['labels'].view(-1))
-                    sampling_ratio = torch.exp(-tgt_nll.view(batch_size, tgt_len))  # [batch, tgt_len]
+                    tgt_nll = loss_fct(tgt_logits, batch["labels"].view(-1))
+                    sampling_ratio = torch.exp(
+                        -tgt_nll.view(batch_size, tgt_len)
+                    )  # [batch, tgt_len]
 
                 assert sampling_ratio.shape == Q.shape == loss.shape
                 loss = (sampling_ratio * Q) * loss
@@ -711,7 +820,10 @@ def main():
 
                 loss = loss / args.gradient_accumulation_steps
                 accelerator.backward(loss)
-                if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+                if (
+                    step % args.gradient_accumulation_steps == 0
+                    or step == len(train_dataloader) - 1
+                ):
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad()
@@ -737,10 +849,12 @@ def main():
 
             # save the model after each epoch of training
             if args.output_dir is not None:
-                epoch_output_dir = os.path.join(args.output_dir, '{}/'.format(epoch))
+                epoch_output_dir = os.path.join(args.output_dir, "{}/".format(epoch))
                 accelerator.wait_for_everyone()
                 unwrapped_model = accelerator.unwrap_model(model)
-                unwrapped_model.save_pretrained(epoch_output_dir, save_function=accelerator.save)
+                unwrapped_model.save_pretrained(
+                    epoch_output_dir, save_function=accelerator.save
+                )
                 if accelerator.is_main_process:
                     tokenizer.save_pretrained(epoch_output_dir)
 

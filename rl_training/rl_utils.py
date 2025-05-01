@@ -1,14 +1,14 @@
-import torch
-import numpy as np
-import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, NewType, Optional, Tuple, Union
 
+import numpy as np
+import torch
+import torch.nn.functional as F
 from transformers.file_utils import PaddingStrategy
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 
-def sequence_mask(lengths, max_len=None, dtype=None, device=None) :
+def sequence_mask(lengths, max_len=None, dtype=None, device=None):
     r"""Return a mask tensor representing the first N positions of each cell.
     If ``lengths`` has shape ``[d_1, d_2, ..., d_n]`` the resulting tensor
     ``mask`` has dtype ``dtype`` and shape ``[d_1, d_2, ..., d_n, maxlen]``,
@@ -49,8 +49,11 @@ def sequence_mask(lengths, max_len=None, dtype=None, device=None) :
         max_len = torch.max(lengths).item()
 
     size = lengths.size()
-    row_vector = torch.arange(max_len, device=device, dtype=lengths.dtype).view(
-        *([1] * len(size)), -1).expand(*size, max_len)
+    row_vector = (
+        torch.arange(max_len, device=device, dtype=lengths.dtype)
+        .view(*([1] * len(size)), -1)
+        .expand(*size, max_len)
+    )
     mask = (row_vector < lengths.unsqueeze(-1)).to(device=device)
     if dtype is not None:
         mask = mask.to(dtype=dtype)
@@ -65,13 +68,10 @@ def masked_reverse_cumsum(X, lengths, dim):
         lengths (Tensor): [batch_size]
         dim (int): -1
         gamma (float): the discount factor
-    
+
     """
     masked_X = X * sequence_mask(lengths, max_len=X.shape[1])
-    return (masked_X
-            .flip(dims=[dim])
-            .cumsum(dim=dim)
-            .flip(dims=[dim]))
+    return masked_X.flip(dims=[dim]).cumsum(dim=dim).flip(dims=[dim])
 
 
 def discounted_future_sum(values, lengths, num_steps=None, gamma=1.0):
@@ -81,18 +81,18 @@ def discounted_future_sum(values, lengths, num_steps=None, gamma=1.0):
         lengths (Tensor): target sequence length with size [batch_size]
         num_steps (int): number of future steps to sum over.
         gamma (float): discount value.
-    
+
     Return:
         output (Tensor): [batch_size, max_tgt_len]
     """
     assert values.dim() == 2
-    
+
     batch_size, total_steps = values.shape
     values = values * sequence_mask(lengths, max_len=values.shape[1])
 
     num_steps = total_steps if num_steps is None else num_steps
     num_steps = min(num_steps, total_steps)
-    
+
     padding = torch.zeros([batch_size, num_steps - 1]).to(values)
     padded_values = torch.cat([values, padding], 1)
     discount_filter = gamma ** torch.arange(num_steps).to(values).reshape(1, 1, -1)
@@ -150,7 +150,11 @@ class DataCollatorForSeq2Seq:
     def __call__(self, features, return_tensors=None):
         if return_tensors is None:
             return_tensors = self.return_tensors
-        labels = [feature["labels"] for feature in features] if "labels" in features[0].keys() else None
+        labels = (
+            [feature["labels"] for feature in features]
+            if "labels" in features[0].keys()
+            else None
+        )
         # We have to pad the labels before calling `tokenizer.pad` as this method won't pad them and needs them of the
         # same length to return tensors.
         if labels is not None:
@@ -164,17 +168,29 @@ class DataCollatorForSeq2Seq:
 
             padding_side = self.tokenizer.padding_side
             for feature in features:
-                remainder = [self.label_pad_token_id] * (max_label_length - len(feature["labels"]))
+                remainder = [self.label_pad_token_id] * (
+                    max_label_length - len(feature["labels"])
+                )
                 if isinstance(feature["labels"], list):
                     feature["labels"] = (
-                        feature["labels"] + remainder if padding_side == "right" else remainder + feature["labels"]
+                        feature["labels"] + remainder
+                        if padding_side == "right"
+                        else remainder + feature["labels"]
                     )
                 elif padding_side == "right":
-                    feature["labels"] = np.concatenate([feature["labels"], remainder]).astype(np.int64)
+                    feature["labels"] = np.concatenate(
+                        [feature["labels"], remainder]
+                    ).astype(np.int64)
                 else:
-                    feature["labels"] = np.concatenate([remainder, feature["labels"]]).astype(np.int64)
+                    feature["labels"] = np.concatenate(
+                        [remainder, feature["labels"]]
+                    ).astype(np.int64)
 
-        rewards = [feature["rewards"] for feature in features] if "rewards" in features[0].keys() else None
+        rewards = (
+            [feature["rewards"] for feature in features]
+            if "rewards" in features[0].keys()
+            else None
+        )
         if rewards is not None:
             max_reward_length = max(len(l) for l in rewards)
             if self.pad_to_multiple_of is not None:
@@ -186,10 +202,14 @@ class DataCollatorForSeq2Seq:
 
             padding_side = self.tokenizer.padding_side
             for feature in features:
-                remainder = [self.reward_pad_value] * (max_reward_length - len(feature["rewards"]))
+                remainder = [self.reward_pad_value] * (
+                    max_reward_length - len(feature["rewards"])
+                )
                 if isinstance(feature["rewards"], list):
                     feature["rewards"] = (
-                        feature["rewards"] + remainder if padding_side == "right" else remainder + feature["rewards"]
+                        feature["rewards"] + remainder
+                        if padding_side == "right"
+                        else remainder + feature["rewards"]
                     )
                 elif padding_side == "right":
                     feature["rewards"] = np.concatenate([feature["rewards"], remainder])
@@ -210,7 +230,9 @@ class DataCollatorForSeq2Seq:
             and self.model is not None
             and hasattr(self.model, "prepare_decoder_input_ids_from_labels")
         ):
-            decoder_input_ids = self.model.prepare_decoder_input_ids_from_labels(labels=features["labels"])
+            decoder_input_ids = self.model.prepare_decoder_input_ids_from_labels(
+                labels=features["labels"]
+            )
             features["decoder_input_ids"] = decoder_input_ids
 
         return features

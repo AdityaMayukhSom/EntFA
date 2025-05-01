@@ -1,0 +1,17 @@
+[project]
+name = "entfa"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "accelerate>=1.6.0",
+    "datasets>=3.5.1",
+    "fairseq>=0.12.2",
+    "nltk>=3.9.1",
+    "setuptools>=80.0.0",
+    "spacy[cuda12x]>=3.8.5",
+    "torch>=2.7.0",
+    "transformers>=4.51.3",
+    "wheel>=0.45.1",
+]
